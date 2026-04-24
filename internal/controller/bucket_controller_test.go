@@ -79,24 +79,26 @@ var _ = Describe("Bucket Controller", func() {
 		var observeRequests atomic.Int32
 		var mutationRequests atomic.Int32
 		var unexpectedRequests atomic.Int32
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodHead && r.URL.Path == "/existing-bucket" &&
-				r.URL.RawQuery == "" {
-				observeRequests.Add(1)
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			if r.Method == http.MethodPut ||
-				r.Method == http.MethodPost ||
-				r.Method == http.MethodDelete {
-				mutationRequests.Add(1)
-				w.WriteHeader(http.StatusTeapot)
-				return
-			}
+		server := httptest.NewTLSServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead && r.URL.Path == "/existing-bucket" &&
+					r.URL.RawQuery == "" {
+					observeRequests.Add(1)
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				if r.Method == http.MethodPut ||
+					r.Method == http.MethodPost ||
+					r.Method == http.MethodDelete {
+					mutationRequests.Add(1)
+					w.WriteHeader(http.StatusTeapot)
+					return
+				}
 
-			unexpectedRequests.Add(1)
-			w.WriteHeader(http.StatusTeapot)
-		}))
+				unexpectedRequests.Add(1)
+				w.WriteHeader(http.StatusTeapot)
+			}),
+		)
 		DeferCleanup(server.Close)
 
 		providerConfig := &obsv1alpha1.ProviderConfig{
@@ -141,6 +143,7 @@ var _ = Describe("Bucket Controller", func() {
 					obs.WithPathStyle(true),
 					obs.WithRegion(region),
 					obs.WithMaxRetryCount(0),
+					obs.WithSslVerify(false),
 				)
 			}),
 		)
