@@ -164,6 +164,17 @@ func (r *ProviderResolver) ResolveProviderConfigObject(
 	return r.cache.set(key, obsClient), nil
 }
 
+// ResolveBucket resolves the ProviderConfig referenced by a Bucket.
+func (r *ProviderResolver) ResolveBucket(
+	ctx context.Context,
+	bucket *obsv1alpha1.Bucket,
+) (*ResolvedClient, error) {
+	return r.ResolveProviderConfig(ctx, types.NamespacedName{
+		Namespace: bucket.Namespace,
+		Name:      bucket.Spec.ProviderConfigRef.Name,
+	})
+}
+
 // InvalidateProvider removes cached clients for a ProviderConfig.
 func (r *ProviderResolver) InvalidateProvider(namespace, name string) {
 	if r == nil || r.cache == nil {

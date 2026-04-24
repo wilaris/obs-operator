@@ -196,7 +196,10 @@ func TestProviderResolverCachesUntilInputsChange(t *testing.T) {
 		t.Fatal("metadata-only ProviderConfig change should use cached client")
 	}
 	if builds != 1 {
-		t.Fatalf("expected metadata-only ProviderConfig change to avoid rebuild, got %d builds", builds)
+		t.Fatalf(
+			"expected metadata-only ProviderConfig change to avoid rebuild, got %d builds",
+			builds,
+		)
 	}
 
 	secret.Labels = map[string]string{"metadata-only": "true"}

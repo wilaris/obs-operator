@@ -15,6 +15,7 @@ rules:
 - apiGroups:
   - obs.wilaris.de
   resources:
+  - buckets
   - providerconfigs
   verbs:
   - create
@@ -27,12 +28,14 @@ rules:
 - apiGroups:
   - obs.wilaris.de
   resources:
+  - buckets/finalizers
   - providerconfigs/finalizers
   verbs:
   - update
 - apiGroups:
   - obs.wilaris.de
   resources:
+  - buckets/status
   - providerconfigs/status
   verbs:
   - get
