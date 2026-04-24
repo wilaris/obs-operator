@@ -19,14 +19,17 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 
+	"github.com/opentelekomcloud/gophertelekomcloud/openstack/obs"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,6 +41,8 @@ import (
 
 const providerConfigCredentialsSecretIndex = ".spec.credentialsSecretRef.name"
 
+var errProviderValidationFailed = errors.New("provider validation failed")
+
 // ProviderConfigReconciler reconciles a ProviderConfig object
 type ProviderConfigReconciler struct {
 	client.Client
@@ -48,6 +53,7 @@ type ProviderConfigReconciler struct {
 // +kubebuilder:rbac:groups=obs.wilaris.de,resources=providerconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=obs.wilaris.de,resources=providerconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=obs.wilaris.de,resources=providerconfigs/finalizers,verbs=update
+// Secret list/watch is used only for metadata-only watches; Secret data reads bypass the cache.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *ProviderConfigReconciler) Reconcile(
@@ -73,6 +79,10 @@ func (r *ProviderConfigReconciler) Reconcile(
 	}
 
 	resolved, err := resolver.ResolveProviderConfigObject(ctx, providerConfig)
+	if err == nil {
+		err = validateProviderClient(ctx, resolved.OBS)
+	}
+
 	if err != nil {
 		resolver.InvalidateProvider(providerConfig.Namespace, providerConfig.Name)
 		log.Info(
@@ -108,6 +118,18 @@ func (r *ProviderConfigReconciler) Reconcile(
 	return ctrl.Result{}, nil
 }
 
+func validateProviderClient(ctx context.Context, obsClient *obs.ObsClient) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	_, err := obsClient.ListBuckets(&obs.ListBucketsInput{})
+	if err != nil {
+		return fmt.Errorf("%w: %w", errProviderValidationFailed, err)
+	}
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ProviderConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(
@@ -124,6 +146,9 @@ func (r *ProviderConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.providerConfigsForSecret),
+			// Keep Secret data out of the informer cache while still reacting to
+			// credential Secret create/update/delete events.
+			builder.OnlyMetadata,
 		).
 		Named("providerconfig").
 		Complete(r)
@@ -178,8 +203,8 @@ func providerConfigReadyCondition(
 	condition := metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
-		Reason:             "ClientConfigured",
-		Message:            "OBS client configuration is valid",
+		Reason:             "ClientValidated",
+		Message:            "OBS client credentials were validated",
 		ObservedGeneration: providerConfig.Generation,
 	}
 
@@ -196,6 +221,8 @@ func providerConfigReadyCondition(
 		condition.Reason = "CredentialsSecretInvalid"
 	case errors.Is(err, provider.ErrInvalidEndpoint):
 		condition.Reason = "InvalidEndpoint"
+	case errors.Is(err, errProviderValidationFailed):
+		condition.Reason = "ClientValidationFailed"
 	default:
 		condition.Reason = "ClientBuildFailed"
 	}

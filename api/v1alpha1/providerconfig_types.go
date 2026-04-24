@@ -29,11 +29,11 @@ type ProviderConfigSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]+(-[a-z0-9]+)*$`
 	Region string `json:"region"`
 
-	// Endpoint is the optional OBS endpoint override.
+	// Endpoint is the optional HTTPS OBS endpoint override.
 	// If unset, the controller derives the endpoint from region.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:Pattern=`^(https?://)?[A-Za-z0-9.-]+(:[0-9]+)?/?$`
+	// +kubebuilder:validation:Pattern=`^(https://)?[A-Za-z0-9.-]+(:[0-9]+)?/?$`
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// CredentialsSecretRef references a Secret in the ProviderConfig namespace.

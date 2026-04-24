@@ -18,15 +18,19 @@ package controller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/opentelekomcloud/gophertelekomcloud/openstack/obs"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -109,10 +113,14 @@ var _ = Describe("ProviderConfig Controller", func() {
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
+			cache := provider.NewCache()
+			resolver, server := testProviderConfigResolver(k8sClient, cache, http.StatusOK)
+			DeferCleanup(server.Close)
+
 			controllerReconciler := &ProviderConfigReconciler{
 				Client:           k8sClient,
 				Scheme:           k8sClient.Scheme(),
-				ProviderResolver: provider.NewProviderResolver(k8sClient, provider.NewCache()),
+				ProviderResolver: resolver,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -127,20 +135,23 @@ var _ = Describe("ProviderConfig Controller", func() {
 				condition := meta.FindStatusCondition(resource.Status.Conditions, "Ready")
 				g.Expect(condition).NotTo(BeNil())
 				g.Expect(condition.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(condition.Reason).To(Equal("ClientConfigured"))
+				g.Expect(condition.Reason).To(Equal("ClientValidated"))
 				g.Expect(resource.Status.ObservedGeneration).To(Equal(resource.Generation))
 				g.Expect(resource.Status.LastValidationTime).NotTo(BeNil())
 			}).Should(Succeed())
+			Expect(cache.Len()).To(Equal(1))
 		})
 
 		It("should set Ready false when the credentials Secret is missing", func() {
 			cache := provider.NewCache()
+			resolver, server := testProviderConfigResolver(k8sClient, cache, http.StatusOK)
+			DeferCleanup(server.Close)
 
 			By("Reconciling the ProviderConfig to warm the cache")
 			controllerReconciler := &ProviderConfigReconciler{
 				Client:           k8sClient,
 				Scheme:           k8sClient.Scheme(),
-				ProviderResolver: provider.NewProviderResolver(k8sClient, cache),
+				ProviderResolver: resolver,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -179,9 +190,52 @@ var _ = Describe("ProviderConfig Controller", func() {
 				g.Expect(resource.Status.LastValidationTime).NotTo(BeNil())
 			}).Should(Succeed())
 		})
+
+		It("should set Ready false when OBS rejects the credentials", func() {
+			cache := provider.NewCache()
+			resolver, server := testProviderConfigResolver(
+				k8sClient,
+				cache,
+				http.StatusForbidden,
+			)
+			DeferCleanup(server.Close)
+
+			controllerReconciler := &ProviderConfigReconciler{
+				Client:           k8sClient,
+				Scheme:           k8sClient.Scheme(),
+				ProviderResolver: resolver,
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cache.Len()).To(Equal(0))
+
+			Eventually(func(g Gomega) {
+				resource := &obsv1alpha1.ProviderConfig{}
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+				condition := meta.FindStatusCondition(resource.Status.Conditions, "Ready")
+				g.Expect(condition).NotTo(BeNil())
+				g.Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(condition.Reason).To(Equal("ClientValidationFailed"))
+				g.Expect(condition.Message).To(ContainSubstring("provider validation failed"))
+				g.Expect(resource.Status.ObservedGeneration).To(Equal(resource.Generation))
+				g.Expect(resource.Status.LastValidationTime).NotTo(BeNil())
+			}).Should(Succeed())
+		})
 	})
 
 	Context("When mapping credentials Secret events", func() {
+		It("should reject plaintext OBS endpoint overrides", func() {
+			endpoint, err := provider.ResolveEndpoint("eu-de", "obs.eu-de.otc.t-systems.com")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(endpoint).To(Equal("https://obs.eu-de.otc.t-systems.com"))
+
+			_, err = provider.ResolveEndpoint("eu-de", "http://obs.eu-de.otc.t-systems.com")
+			Expect(err).To(MatchError(ContainSubstring("endpoint scheme must be https")))
+		})
+
 		It("should enqueue same-namespace ProviderConfigs that reference the Secret", func() {
 			ctx := context.Background()
 			scheme := runtime.NewScheme()
@@ -269,3 +323,50 @@ var _ = Describe("ProviderConfig Controller", func() {
 		})
 	})
 })
+
+func testProviderConfigResolver(
+	k8sClient client.Client,
+	cache *provider.Cache,
+	validationStatus int,
+) (*provider.ProviderResolver, *httptest.Server) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			w.WriteHeader(http.StatusTeapot)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(validationStatus)
+		if validationStatus >= http.StatusBadRequest {
+			_, _ = w.Write(
+				[]byte(`<Error><Code>AccessDenied</Code><Message>access denied</Message></Error>`),
+			)
+			return
+		}
+
+		_, _ = w.Write([]byte(
+			`<?xml version="1.0" encoding="UTF-8"?><ListAllMyBucketsResult><Owner><ID>owner</ID></Owner><Buckets></Buckets></ListAllMyBucketsResult>`,
+		))
+	}))
+
+	resolver := provider.NewProviderResolver(
+		k8sClient,
+		cache,
+		provider.WithOBSClientFactory(func(
+			credentials provider.Credentials,
+			_ string,
+			region string,
+		) (*obs.ObsClient, error) {
+			return obs.New(
+				credentials.AccessKeyID,
+				credentials.SecretAccessKey,
+				server.URL,
+				obs.WithRegion(region),
+				obs.WithMaxRetryCount(0),
+				obs.WithSslVerify(false),
+			)
+		}),
+	)
+
+	return resolver, server
+}

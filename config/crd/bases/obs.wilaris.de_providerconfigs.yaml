@@ -73,10 +73,10 @@ spec:
                   rule: has(self.name) && self.name != ''
               endpoint:
                 description: |-
-                  Endpoint is the optional OBS endpoint override.
+                  Endpoint is the optional HTTPS OBS endpoint override.
                   If unset, the controller derives the endpoint from region.
                 minLength: 1
-                pattern: ^(https?://)?[A-Za-z0-9.-]+(:[0-9]+)?/?$
+                pattern: ^(https://)?[A-Za-z0-9.-]+(:[0-9]+)?/?$
                 type: string
               region:
                 description: Region is the T Cloud Public/Open Telekom Cloud region

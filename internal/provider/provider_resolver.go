@@ -240,8 +240,8 @@ func ResolveEndpoint(region, endpoint string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: %s", ErrInvalidEndpoint, err)
 	}
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return "", fmt.Errorf("%w: endpoint scheme must be http or https", ErrInvalidEndpoint)
+	if parsed.Scheme != "https" {
+		return "", fmt.Errorf("%w: endpoint scheme must be https", ErrInvalidEndpoint)
 	}
 	if parsed.Host == "" {
 		return "", fmt.Errorf("%w: endpoint host is required", ErrInvalidEndpoint)
