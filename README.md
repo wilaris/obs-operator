@@ -1,135 +1,134 @@
 # obs-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+`obs-operator` is a small Kubernetes operator for declarative OBS bucket
+management.
 
-## Getting Started
+It exposes Object Storage Service (OBS) buckets on T Cloud Public through a
+simple Kubernetes API. Teams describe buckets as custom resources, the operator
+reconciles the requested OBS state and readiness is reported back through normal
+Kubernetes status conditions.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+The project intentionally keeps the model small: one resource describes how to
+connect to OBS and one resource describes a bucket.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+## Why this exists
 
-```sh
-make docker-build docker-push IMG=<some-registry>/obs-operator:tag
+We needed a practical way to provide customers with self-service resources such
+as S3/OBS buckets while keeping responsibility boundaries clear: the platform
+owns provider credentials and infrastructure integration, services consume
+Kubernetes APIs and customer workloads request only the resources they need.
+
+Direct cloud console access or broad OBS permissions would have pushed too much
+provider-specific responsibility into the customer layer. At the same time,
+manually provisioning every bucket in the infrastructure layer would have made
+simple consumption workflows unnecessarily slow.
+
+This operator is the approach we came up with: a small Kubernetes-native
+interface that lets buckets be requested and reconciled where the consuming
+workloads already live, without turning the project into a broad cloud control
+plane.
+
+That same pattern may be useful if you want to:
+
+- keep bucket requests declarative and reviewable
+- work with GitOps and existing Kubernetes workflows
+- avoid direct provider credential access for users or tenants
+- make lifecycle behavior predictable and visible in Kubernetes
+- keep the operator easy to understand and operate
+
+`obs-operator` focuses on the common bucket lifecycle needed for those workflows
+and deliberately avoids becoming a general-purpose cloud control plane.
+
+## Resource model
+
+The operator defines two namespaced custom resources in
+`obs.wilaris.de/v1alpha1`.
+
+| Resource | Purpose |
+| --- | --- |
+| `ProviderConfig` | Describes the OBS region, optional endpoint and credentials Secret used by the controller. |
+| `Bucket` | Describes one OBS bucket that should be created, reconciled, observed and deleted. |
+
+`ProviderConfig`, its credentials Secret and all `Bucket` resources that use it
+must live in the same namespace.
+
+### ProviderConfig
+
+`ProviderConfig` is the platform-side part of the contract. It tells the
+operator which T Cloud Public OBS region to use and which Kubernetes Secret
+contains the credentials for that namespace.
+
+```yaml
+apiVersion: obs.wilaris.de/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: otc-eu-de
+  namespace: obs-demo
+spec:
+  region: eu-de
+  credentialsSecretRef:
+    name: obs-credentials
+  # Optional. If omitted, the controller derives the OBS endpoint from region.
+  # endpoint: https://obs.eu-de.otc.t-systems.com
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+The referenced Secret contains `accessKeyID` and `secretAccessKey` and can
+also include `securityToken` for temporary credentials. The operator validates
+the configuration by creating an OBS client and listing buckets, then reports
+the result through a Kubernetes `Ready` condition.
 
-**Install the CRDs into the cluster:**
+### Bucket
 
-```sh
-make install
+`Bucket` is the resource consumers normally care about. Create one, point it at
+a `ProviderConfig` and the operator creates the OBS bucket and reconciles its
+supported settings whenever the Kubernetes resource is reconciled. The
+Kubernetes object name is the OBS bucket name.
+
+```yaml
+apiVersion: obs.wilaris.de/v1alpha1
+kind: Bucket
+metadata:
+  name: backups-2026
+  namespace: obs-demo
+spec:
+  providerConfigRef:
+    name: otc-eu-de
+  storageClass: STANDARD
+  acl: private
+  versioning: true
+  forceDestroy: false
+  tags:
+    app: backups
+    owner: platform
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+The spec intentionally covers the bucket settings that tend to matter for
+day-to-day consumption:
 
-```sh
-make deploy IMG=<some-registry>/obs-operator:tag
-```
+- storage class: `STANDARD`, `WARM` or `COLD`
+- canned ACL: `private`, `public-read`, `public-read-write` or `log-delivery-write`
+- versioning
+- bucket tags
+- access logging
+- default server-side encryption using OBS KMS
+- optional Parallel File System creation with `parallelFS`
+- deletion behavior with `forceDestroy`
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+## Design choices
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+The operator is deliberately conservative about ownership. It creates and
+manages buckets that it owns through Kubernetes resources, but it does not try to
+adopt arbitrary existing buckets.
 
-```sh
-kubectl apply -k config/samples/
-```
+Some fields are fixed after creation because changing them would blur ownership
+or conflict with OBS behavior.
 
->**NOTE**: Ensure that the samples has default values to test it out.
+Deleting a `Bucket` resource deletes the owned OBS bucket as well. Empty buckets
+are removed directly; non-empty buckets require `forceDestroy: true` when the
+operator should remove object versions and delete markers before deletion.
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/obs-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/obs-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+If an owned bucket is missing when the controller reconciles a still-existing
+`Bucket` resource, the operator creates it again. The controller currently
+reconciles from Kubernetes events for `Bucket` and `ProviderConfig` resources;
+it does not poll OBS on a fixed interval. Readiness and failures are always
+reported through `.status.conditions`.
