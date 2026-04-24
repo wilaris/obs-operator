@@ -226,9 +226,9 @@ func providerConfigReadyCondition(
 	condition.Message = err.Error()
 	switch {
 	case errors.Is(err, provider.ErrCredentialsSecretNotFound):
-		condition.Reason = "CredentialsSecretNotFound"
+		condition.Reason = conditionReasonCredentialsSecretNotFound
 	case apierrors.IsNotFound(err):
-		condition.Reason = "CredentialsSecretNotFound"
+		condition.Reason = conditionReasonCredentialsSecretNotFound
 	case errors.Is(err, provider.ErrMissingCredentials):
 		condition.Reason = "CredentialsSecretInvalid"
 	case errors.Is(err, provider.ErrInvalidEndpoint):

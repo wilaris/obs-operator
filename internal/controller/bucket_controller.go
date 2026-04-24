@@ -42,15 +42,16 @@ import (
 )
 
 const (
-	bucketFinalizer               = "buckets.obs.wilaris.de/finalizer"
-	bucketProviderConfigRefIndex  = ".spec.providerConfigRef.name"
-	bucketReadyCondition          = "Ready"
-	bucketEncryptionAlgorithm     = "kms"
-	obsBucketAlreadyExistsCode    = "BucketAlreadyExists"
-	obsBucketAlreadyOwnedByYou    = "BucketAlreadyOwnedByYou"
-	obsNoSuchTagSetCode           = "NoSuchTagSet"
-	obsNoSuchEncryptionConfigCode = "NoSuchEncryptionConfiguration"
-	obsFsNotSupportCode           = "FsNotSupport"
+	bucketFinalizer                          = "buckets.obs.wilaris.de/finalizer"
+	bucketProviderConfigRefIndex             = ".spec.providerConfigRef.name"
+	bucketReadyCondition                     = "Ready"
+	bucketEncryptionAlgorithm                = "kms"
+	conditionReasonCredentialsSecretNotFound = "CredentialsSecretNotFound"
+	obsBucketAlreadyExistsCode               = "BucketAlreadyExists"
+	obsBucketAlreadyOwnedByYou               = "BucketAlreadyOwnedByYou"
+	obsNoSuchTagSetCode                      = "NoSuchTagSet"
+	obsNoSuchEncryptionConfigCode            = "NoSuchEncryptionConfiguration"
+	obsFsNotSupportCode                      = "FsNotSupport"
 )
 
 var errBucketAlreadyExists = errors.New("bucket already exists")
@@ -798,7 +799,7 @@ func bucketReadyStatusCondition(
 	case errors.Is(err, provider.ErrProviderConfigNotFound):
 		condition.Reason = "ProviderConfigNotFound"
 	case errors.Is(err, provider.ErrCredentialsSecretNotFound):
-		condition.Reason = "CredentialsSecretNotFound"
+		condition.Reason = conditionReasonCredentialsSecretNotFound
 	case apierrors.IsNotFound(err):
 		condition.Reason = "ProviderConfigNotFound"
 	case errors.Is(err, provider.ErrMissingCredentials):
