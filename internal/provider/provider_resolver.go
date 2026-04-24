@@ -60,6 +60,7 @@ type ResolvedClient struct {
 	CredentialsSecret types.NamespacedName
 	Region            string
 	Endpoint          string
+	ProviderRevision  string
 	FromCache         bool
 }
 
@@ -149,10 +150,12 @@ func (r *ProviderResolver) ResolveProviderConfigObject(
 		Region:            region,
 		Endpoint:          endpoint,
 	}
+	providerRevision := observedProviderRevision(providerConfig, secret, region, endpoint)
 
 	if resolved, ok := r.cache.get(key); ok {
 		cached := *resolved
 		cached.FromCache = true
+		cached.ProviderRevision = providerRevision
 		return &cached, nil
 	}
 
@@ -161,7 +164,9 @@ func (r *ProviderResolver) ResolveProviderConfigObject(
 		return nil, fmt.Errorf("build OBS client: %w", err)
 	}
 
-	return r.cache.set(key, obsClient), nil
+	resolved := r.cache.set(key, obsClient)
+	resolved.ProviderRevision = providerRevision
+	return resolved, nil
 }
 
 // ResolveBucket resolves the ProviderConfig referenced by a Bucket.
@@ -222,6 +227,31 @@ func (c Credentials) Hash() string {
 	hash.Write([]byte(c.SecretAccessKey))
 	hash.Write([]byte{0})
 	hash.Write([]byte(c.SecurityToken))
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func observedProviderRevision(
+	providerConfig *obsv1alpha1.ProviderConfig,
+	secret *corev1.Secret,
+	region string,
+	endpoint string,
+) string {
+	hash := sha256.New()
+	for _, value := range []string{
+		providerConfig.Namespace,
+		providerConfig.Name,
+		string(providerConfig.UID),
+		fmt.Sprint(providerConfig.Generation),
+		secret.Namespace,
+		secret.Name,
+		string(secret.UID),
+		secret.ResourceVersion,
+		region,
+		endpoint,
+	} {
+		hash.Write([]byte(value))
+		hash.Write([]byte{0})
+	}
 	return hex.EncodeToString(hash.Sum(nil))
 }
 

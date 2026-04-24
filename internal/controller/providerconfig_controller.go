@@ -111,7 +111,16 @@ func (r *ProviderConfigReconciler) Reconcile(
 	}
 
 	condition := providerConfigReadyCondition(providerConfig, err)
-	if err := r.updateProviderConfigStatus(ctx, providerConfig, condition); err != nil {
+	providerRevision := ""
+	if resolved != nil {
+		providerRevision = resolved.ProviderRevision
+	}
+	if err := r.updateProviderConfigStatus(
+		ctx,
+		providerConfig,
+		condition,
+		providerRevision,
+	); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -233,13 +242,16 @@ func (r *ProviderConfigReconciler) updateProviderConfigStatus(
 	ctx context.Context,
 	providerConfig *obsv1alpha1.ProviderConfig,
 	condition metav1.Condition,
+	providerRevision string,
 ) error {
 	original := providerConfig.DeepCopy()
 	nextStatus := providerConfig.Status
 	nextStatus.ObservedGeneration = providerConfig.Generation
+	nextStatus.ObservedProviderRevision = providerRevision
 	meta.SetStatusCondition(&nextStatus.Conditions, condition)
 
 	statusChanged := original.Status.ObservedGeneration != nextStatus.ObservedGeneration ||
+		original.Status.ObservedProviderRevision != nextStatus.ObservedProviderRevision ||
 		original.Status.LastValidationTime == nil ||
 		!reflect.DeepEqual(original.Status.Conditions, nextStatus.Conditions)
 	if !statusChanged {

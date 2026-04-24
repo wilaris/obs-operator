@@ -160,6 +160,13 @@ spec:
                   by the controller.
                 format: int64
                 type: integer
+              observedProviderRevision:
+                description: |-
+                  ObservedProviderRevision is an opaque, non-secret identifier for the
+                  provider inputs last observed by the controller.
+                  It changes when the referenced Secret resource version, resolved endpoint,
+                  region or ProviderConfig generation changes.
+                type: string
             type: object
         required:
         - spec

@@ -159,6 +159,9 @@ func TestProviderResolverCachesUntilInputsChange(t *testing.T) {
 	if first.FromCache {
 		t.Fatal("first resolution should not be served from cache")
 	}
+	if first.ProviderRevision == "" {
+		t.Fatal("first resolution should return a provider revision")
+	}
 	if builds != 1 {
 		t.Fatalf("expected one client build, got %d", builds)
 	}
@@ -195,6 +198,9 @@ func TestProviderResolverCachesUntilInputsChange(t *testing.T) {
 	if !afterProviderMetadata.FromCache {
 		t.Fatal("metadata-only ProviderConfig change should use cached client")
 	}
+	if afterProviderMetadata.ProviderRevision != first.ProviderRevision {
+		t.Fatal("metadata-only ProviderConfig change should not change provider revision")
+	}
 	if builds != 1 {
 		t.Fatalf(
 			"expected metadata-only ProviderConfig change to avoid rebuild, got %d builds",
@@ -217,12 +223,23 @@ func TestProviderResolverCachesUntilInputsChange(t *testing.T) {
 	if !afterSecretMetadata.FromCache {
 		t.Fatal("metadata-only Secret change should use cached client")
 	}
+	if afterSecretMetadata.ProviderRevision == first.ProviderRevision {
+		t.Fatal("metadata-only Secret resource version change should change provider revision")
+	}
 	if builds != 1 {
 		t.Fatalf("expected metadata-only Secret change to avoid rebuild, got %d builds", builds)
 	}
 
-	secret.Data[SecurityTokenSecretKey] = []byte("rotated")
-	if err := k8sClient.Update(ctx, secret); err != nil {
+	latestSecret := &corev1.Secret{}
+	if err := k8sClient.Get(
+		ctx,
+		types.NamespacedName{Namespace: "default", Name: "credentials"},
+		latestSecret,
+	); err != nil {
+		t.Fatalf("get latest secret: %v", err)
+	}
+	latestSecret.Data[SecurityTokenSecretKey] = []byte("rotated")
+	if err := k8sClient.Update(ctx, latestSecret); err != nil {
 		t.Fatalf("update secret: %v", err)
 	}
 

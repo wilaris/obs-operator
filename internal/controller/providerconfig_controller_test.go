@@ -138,6 +138,7 @@ var _ = Describe("ProviderConfig Controller", func() {
 				g.Expect(condition.Reason).To(Equal("ClientValidated"))
 				g.Expect(resource.Status.ObservedGeneration).To(Equal(resource.Generation))
 				g.Expect(resource.Status.LastValidationTime).NotTo(BeNil())
+				g.Expect(resource.Status.ObservedProviderRevision).NotTo(BeEmpty())
 			}).Should(Succeed())
 			Expect(cache.Len()).To(Equal(1))
 		})
@@ -320,6 +321,53 @@ var _ = Describe("ProviderConfig Controller", func() {
 				},
 			)
 			Expect(requests).To(BeEmpty())
+		})
+
+		It("should update status when the observed provider revision changes", func() {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			Expect(obsv1alpha1.AddToScheme(scheme)).To(Succeed())
+
+			providerConfig := &obsv1alpha1.ProviderConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "provider",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: obsv1alpha1.ProviderConfigSpec{
+					Region: "eu-de",
+					CredentialsSecretRef: corev1.LocalObjectReference{
+						Name: "otc-credentials",
+					},
+				},
+			}
+			condition := providerConfigReadyCondition(providerConfig, nil)
+			providerConfig.Status.ObservedGeneration = providerConfig.Generation
+			providerConfig.Status.ObservedProviderRevision = "old-revision"
+			providerConfig.Status.LastValidationTime = &metav1.Time{}
+			meta.SetStatusCondition(&providerConfig.Status.Conditions, condition)
+
+			k8sClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&obsv1alpha1.ProviderConfig{}).
+				WithObjects(providerConfig).
+				Build()
+			reconciler := &ProviderConfigReconciler{Client: k8sClient}
+
+			current := &obsv1alpha1.ProviderConfig{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(providerConfig), current)).
+				To(Succeed())
+			Expect(reconciler.updateProviderConfigStatus(
+				ctx,
+				current,
+				condition,
+				"new-revision",
+			)).To(Succeed())
+
+			updated := &obsv1alpha1.ProviderConfig{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(providerConfig), updated)).
+				To(Succeed())
+			Expect(updated.Status.ObservedProviderRevision).To(Equal("new-revision"))
 		})
 	})
 })

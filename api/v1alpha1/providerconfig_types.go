@@ -54,6 +54,13 @@ type ProviderConfigStatus struct {
 	// +optional
 	LastValidationTime *metav1.Time `json:"lastValidationTime,omitempty"`
 
+	// ObservedProviderRevision is an opaque, non-secret identifier for the
+	// provider inputs last observed by the controller.
+	// It changes when the referenced Secret resource version, resolved endpoint,
+	// region or ProviderConfig generation changes.
+	// +optional
+	ObservedProviderRevision string `json:"observedProviderRevision,omitempty"`
+
 	// Conditions represent the current state of the ProviderConfig resource.
 	// +listType=map
 	// +listMapKey=type
