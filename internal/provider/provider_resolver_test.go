@@ -7,6 +7,7 @@ import (
 
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/obs"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -90,6 +91,56 @@ func TestCredentialsFromSecret(t *testing.T) {
 	delete(secret.Data, SecretAccessKeySecretKey)
 	if _, err := CredentialsFromSecret(secret); !errors.Is(err, ErrMissingCredentials) {
 		t.Fatalf("expected missing credentials error, got %v", err)
+	}
+}
+
+func TestProviderResolverPreservesNotFoundErrorIdentity(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := obsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add OBS scheme: %v", err)
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(&obsv1alpha1.ProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "provider",
+			},
+			Spec: obsv1alpha1.ProviderConfigSpec{
+				Region: "eu-de",
+				CredentialsSecretRef: corev1.LocalObjectReference{
+					Name: "missing-credentials",
+				},
+			},
+		}).
+		Build()
+	resolver := NewProviderResolver(k8sClient, NewCache())
+
+	_, err := resolver.ResolveProviderConfig(
+		ctx,
+		types.NamespacedName{Namespace: "default", Name: "missing-provider"},
+	)
+	if !errors.Is(err, ErrProviderConfigNotFound) {
+		t.Fatalf("expected ProviderConfig sentinel, got %v", err)
+	}
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected Kubernetes NotFound identity, got %v", err)
+	}
+
+	_, err = resolver.ResolveProviderConfig(
+		ctx,
+		types.NamespacedName{Namespace: "default", Name: "provider"},
+	)
+	if !errors.Is(err, ErrCredentialsSecretNotFound) {
+		t.Fatalf("expected credentials Secret sentinel, got %v", err)
+	}
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected Kubernetes NotFound identity, got %v", err)
 	}
 }
 

@@ -224,6 +224,8 @@ func providerConfigReadyCondition(
 	condition.Status = metav1.ConditionFalse
 	condition.Message = err.Error()
 	switch {
+	case errors.Is(err, provider.ErrCredentialsSecretNotFound):
+		condition.Reason = "CredentialsSecretNotFound"
 	case apierrors.IsNotFound(err):
 		condition.Reason = "CredentialsSecretNotFound"
 	case errors.Is(err, provider.ErrMissingCredentials):

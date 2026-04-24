@@ -11,6 +11,7 @@ import (
 
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/obs"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -27,11 +28,32 @@ const (
 )
 
 var (
+	// ErrProviderConfigNotFound indicates that the referenced ProviderConfig does not exist.
+	ErrProviderConfigNotFound = errors.New("provider config not found")
+	// ErrCredentialsSecretNotFound indicates that the referenced credentials Secret does not exist.
+	ErrCredentialsSecretNotFound = errors.New("credentials secret not found")
 	// ErrMissingCredentials indicates that the credentials Secret is missing required keys.
 	ErrMissingCredentials = errors.New("missing provider credentials")
 	// ErrInvalidEndpoint indicates that the configured OBS endpoint is invalid.
 	ErrInvalidEndpoint = errors.New("invalid OBS endpoint")
 )
+
+type resolutionNotFoundError struct {
+	kind error
+	err  error
+}
+
+func (e resolutionNotFoundError) Error() string {
+	return fmt.Sprintf("%v: %v", e.kind, e.err)
+}
+
+func (e resolutionNotFoundError) Unwrap() error {
+	return e.err
+}
+
+func (e resolutionNotFoundError) Is(target error) bool {
+	return target == e.kind
+}
 
 // OBSClientFactory creates an OBS client from resolved provider configuration.
 type OBSClientFactory func(credentials Credentials, endpoint string, region string) (*obs.ObsClient, error)
@@ -107,6 +129,9 @@ func (r *ProviderResolver) ResolveProviderConfig(
 ) (*ResolvedClient, error) {
 	providerConfig := &obsv1alpha1.ProviderConfig{}
 	if err := r.client.Get(ctx, key, providerConfig); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, resolutionNotFoundError{kind: ErrProviderConfigNotFound, err: err}
+		}
 		return nil, err
 	}
 
@@ -124,6 +149,9 @@ func (r *ProviderResolver) ResolveProviderConfigObject(
 	}
 	secret := &corev1.Secret{}
 	if err := r.client.Get(ctx, secretKey, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, resolutionNotFoundError{kind: ErrCredentialsSecretNotFound, err: err}
+		}
 		return nil, err
 	}
 

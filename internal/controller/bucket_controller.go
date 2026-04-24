@@ -652,7 +652,53 @@ func (r *BucketReconciler) patchStatus(
 	if statusErr != nil {
 		return ctrl.Result{}, statusErr
 	}
+	if isUserCorrectableBucketError(reconcileErr) {
+		return ctrl.Result{}, nil
+	}
 	return ctrl.Result{}, reconcileErr
+}
+
+func isUserCorrectableBucketError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return allBucketErrorsUserCorrectable(joined.Unwrap())
+	}
+
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		child := wrapped.Unwrap()
+		if _, childIsJoined := child.(interface{ Unwrap() []error }); childIsJoined {
+			return isUserCorrectableBucketError(child)
+		}
+		if isUserCorrectableBucketErrorType(err) {
+			return true
+		}
+		return isUserCorrectableBucketError(child)
+	}
+
+	return isUserCorrectableBucketErrorType(err)
+}
+
+func allBucketErrorsUserCorrectable(children []error) bool {
+	if len(children) == 0 {
+		return false
+	}
+	for _, child := range children {
+		if !isUserCorrectableBucketError(child) {
+			return false
+		}
+	}
+	return true
+}
+
+func isUserCorrectableBucketErrorType(err error) bool {
+	return errors.Is(err, provider.ErrProviderConfigNotFound) ||
+		errors.Is(err, provider.ErrCredentialsSecretNotFound) ||
+		errors.Is(err, provider.ErrMissingCredentials) ||
+		errors.Is(err, provider.ErrInvalidEndpoint) ||
+		errors.Is(err, errBucketAlreadyExists)
 }
 
 func bucketReadyStatusCondition(
@@ -674,6 +720,10 @@ func bucketReadyStatusCondition(
 	condition.Status = metav1.ConditionFalse
 	condition.Message = err.Error()
 	switch {
+	case errors.Is(err, provider.ErrProviderConfigNotFound):
+		condition.Reason = "ProviderConfigNotFound"
+	case errors.Is(err, provider.ErrCredentialsSecretNotFound):
+		condition.Reason = "CredentialsSecretNotFound"
 	case apierrors.IsNotFound(err):
 		condition.Reason = "ProviderConfigNotFound"
 	case errors.Is(err, provider.ErrMissingCredentials):

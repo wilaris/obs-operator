@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -27,9 +28,11 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/opentelekomcloud/gophertelekomcloud/openstack/obs"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -64,7 +67,7 @@ var _ = Describe("Bucket Controller", func() {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: bucket.Name, Namespace: bucket.Namespace},
 		})
-		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
 
 		current := &obsv1alpha1.Bucket{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bucket), current)).To(Succeed())
@@ -73,6 +76,115 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(condition).NotTo(BeNil())
 		Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 		Expect(condition.Reason).To(Equal("ProviderConfigNotFound"))
+	})
+
+	It("returns nil after status for user-correctable provider resolution failures", func() {
+		cases := []struct {
+			name    string
+			objects []client.Object
+			reason  string
+		}{
+			{
+				name: "missing-credentials-secret",
+				objects: []client.Object{
+					&obsv1alpha1.ProviderConfig{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "provider",
+							Namespace: namespace,
+						},
+						Spec: obsv1alpha1.ProviderConfigSpec{
+							Region: "eu-de",
+							CredentialsSecretRef: corev1.LocalObjectReference{
+								Name: "missing-credentials",
+							},
+						},
+					},
+				},
+				reason: "CredentialsSecretNotFound",
+			},
+			{
+				name: "missing-credential-keys",
+				objects: []client.Object{
+					&obsv1alpha1.ProviderConfig{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "provider",
+							Namespace: namespace,
+						},
+						Spec: obsv1alpha1.ProviderConfigSpec{
+							Region: "eu-de",
+							CredentialsSecretRef: corev1.LocalObjectReference{
+								Name: "obs-credentials",
+							},
+						},
+					},
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "obs-credentials",
+							Namespace: namespace,
+						},
+						Data: map[string][]byte{
+							provider.AccessKeyIDSecretKey: []byte("access-key"),
+						},
+					},
+				},
+				reason: "CredentialsSecretInvalid",
+			},
+			{
+				name: "invalid-endpoint",
+				objects: []client.Object{
+					&obsv1alpha1.ProviderConfig{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "provider",
+							Namespace: namespace,
+						},
+						Spec: obsv1alpha1.ProviderConfigSpec{
+							Region:   "eu-de",
+							Endpoint: "http://obs.test",
+							CredentialsSecretRef: corev1.LocalObjectReference{
+								Name: "obs-credentials",
+							},
+						},
+					},
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "obs-credentials",
+							Namespace: namespace,
+						},
+						Data: map[string][]byte{
+							provider.AccessKeyIDSecretKey:     []byte("access-key"),
+							provider.SecretAccessKeySecretKey: []byte("secret-key"),
+						},
+					},
+				},
+				reason: "InvalidEndpoint",
+			},
+		}
+
+		for _, tc := range cases {
+			By(tc.name)
+			bucket := testBucket(tc.name, obsv1alpha1.BucketSpec{
+				ProviderConfigRef: corev1.LocalObjectReference{Name: "provider"},
+			})
+			objects := append([]client.Object{bucket}, tc.objects...)
+			k8sClient := testClient(scheme, objects...)
+			reconciler := testBucketReconciler(k8sClient)
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      bucket.Name,
+					Namespace: bucket.Namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			current := &obsv1alpha1.Bucket{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bucket), current)).To(Succeed())
+			Expect(current.Finalizers).NotTo(ContainElement(bucketFinalizer))
+			condition := meta.FindStatusCondition(current.Status.Conditions, bucketReadyCondition)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(condition.Reason).To(Equal(tc.reason))
+		}
 	})
 
 	It("does not adopt a pre-existing OBS bucket", func() {
@@ -152,8 +264,7 @@ var _ = Describe("Bucket Controller", func() {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: bucket.Name, Namespace: bucket.Namespace},
 		})
-		Expect(err).To(HaveOccurred())
-		Expect(errors.Is(err, errBucketAlreadyExists)).To(BeTrue())
+		Expect(err).NotTo(HaveOccurred())
 
 		current := &obsv1alpha1.Bucket{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bucket), current)).To(Succeed())
@@ -165,6 +276,88 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(observeRequests.Load()).To(Equal(int32(1)))
 		Expect(mutationRequests.Load()).To(Equal(int32(0)))
 		Expect(unexpectedRequests.Load()).To(Equal(int32(0)))
+	})
+
+	It("keeps returning errors for transient OBS failures", func() {
+		var observeRequests atomic.Int32
+		server := httptest.NewTLSServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead && r.URL.Path == "/transient-bucket" &&
+					r.URL.RawQuery == "" {
+					observeRequests.Add(1)
+					w.Header().Set("Content-Type", "application/xml")
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(
+						`<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code><Message>temporary failure</Message></Error>`,
+					))
+					return
+				}
+
+				w.WriteHeader(http.StatusTeapot)
+			}),
+		)
+		DeferCleanup(server.Close)
+
+		providerConfig := &obsv1alpha1.ProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "provider",
+				Namespace: namespace,
+			},
+			Spec: obsv1alpha1.ProviderConfigSpec{
+				Region:   "eu-de",
+				Endpoint: server.URL,
+				CredentialsSecretRef: corev1.LocalObjectReference{
+					Name: "obs-credentials",
+				},
+			},
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "obs-credentials",
+				Namespace: namespace,
+			},
+			Data: map[string][]byte{
+				provider.AccessKeyIDSecretKey:     []byte("access-key"),
+				provider.SecretAccessKeySecretKey: []byte("secret-key"),
+			},
+		}
+		bucket := testBucket("transient-bucket", obsv1alpha1.BucketSpec{
+			ProviderConfigRef: corev1.LocalObjectReference{Name: "provider"},
+		})
+		k8sClient := testClient(scheme, providerConfig, secret, bucket)
+		resolver := provider.NewProviderResolver(
+			k8sClient,
+			provider.NewCache(),
+			provider.WithOBSClientFactory(func(
+				credentials provider.Credentials,
+				endpoint string,
+				region string,
+			) (*obs.ObsClient, error) {
+				return obs.New(
+					credentials.AccessKeyID,
+					credentials.SecretAccessKey,
+					endpoint,
+					obs.WithPathStyle(true),
+					obs.WithRegion(region),
+					obs.WithMaxRetryCount(0),
+					obs.WithSslVerify(false),
+				)
+			}),
+		)
+		reconciler := &BucketReconciler{Client: k8sClient, ProviderResolver: resolver}
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: bucket.Name, Namespace: bucket.Namespace},
+		})
+		Expect(err).To(HaveOccurred())
+		Expect(observeRequests.Load()).To(Equal(int32(1)))
+
+		current := &obsv1alpha1.Bucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bucket), current)).To(Succeed())
+		condition := meta.FindStatusCondition(current.Status.Conditions, bucketReadyCondition)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+		Expect(condition.Reason).To(Equal("ReconcileFailed"))
 	})
 
 	It("blocks deletion of non-empty buckets without force destroy", func() {
@@ -361,6 +554,31 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(isCreateBucketConflict(obsError(obsBucketAlreadyOwnedByYou, 409))).To(BeTrue())
 		Expect(isBucketCode(obsError(obsNoSuchTagSetCode, 404), obsNoSuchTagSetCode)).To(BeTrue())
 		Expect(isBucketNotFound(obsError("BucketNotEmpty", 409))).To(BeFalse())
+	})
+
+	It("classifies user-correctable bucket reconcile errors", func() {
+		transientErr := errors.New("transient failure")
+		notFoundErr := apierrors.NewNotFound(schema.GroupResource{
+			Group:    "obs.wilaris.de",
+			Resource: "providerconfigs",
+		}, "missing")
+		wrappedMixedErr := fmt.Errorf(
+			"outer: %w",
+			errors.Join(errBucketAlreadyExists, transientErr),
+		)
+
+		Expect(isUserCorrectableBucketError(provider.ErrProviderConfigNotFound)).To(BeTrue())
+		Expect(isUserCorrectableBucketError(provider.ErrCredentialsSecretNotFound)).To(BeTrue())
+		Expect(isUserCorrectableBucketError(provider.ErrMissingCredentials)).To(BeTrue())
+		Expect(isUserCorrectableBucketError(provider.ErrInvalidEndpoint)).To(BeTrue())
+		Expect(isUserCorrectableBucketError(errBucketAlreadyExists)).To(BeTrue())
+		Expect(isUserCorrectableBucketError(fmt.Errorf("wrapped: %w", errBucketAlreadyExists))).
+			To(BeTrue())
+		Expect(isUserCorrectableBucketError(notFoundErr)).To(BeFalse())
+		Expect(isUserCorrectableBucketError(transientErr)).To(BeFalse())
+		Expect(isUserCorrectableBucketError(errors.Join(errBucketAlreadyExists, transientErr))).
+			To(BeFalse())
+		Expect(isUserCorrectableBucketError(wrappedMixedErr)).To(BeFalse())
 	})
 })
 
