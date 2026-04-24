@@ -21,17 +21,22 @@ import (
 	"errors"
 	"reflect"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	obsv1alpha1 "go.wilaris.de/obs-operator/api/v1alpha1"
 	"go.wilaris.de/obs-operator/internal/provider"
 )
+
+const providerConfigCredentialsSecretIndex = ".spec.credentialsSecretRef.name"
 
 // ProviderConfigReconciler reconciles a ProviderConfig object
 type ProviderConfigReconciler struct {
@@ -43,7 +48,7 @@ type ProviderConfigReconciler struct {
 // +kubebuilder:rbac:groups=obs.wilaris.de,resources=providerconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=obs.wilaris.de,resources=providerconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=obs.wilaris.de,resources=providerconfigs/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *ProviderConfigReconciler) Reconcile(
 	ctx context.Context,
@@ -69,6 +74,7 @@ func (r *ProviderConfigReconciler) Reconcile(
 
 	resolved, err := resolver.ResolveProviderConfigObject(ctx, providerConfig)
 	if err != nil {
+		resolver.InvalidateProvider(providerConfig.Namespace, providerConfig.Name)
 		log.Info(
 			"ProviderConfig is not ready",
 			"name",
@@ -104,10 +110,65 @@ func (r *ProviderConfigReconciler) Reconcile(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ProviderConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&obsv1alpha1.ProviderConfig{},
+		providerConfigCredentialsSecretIndex,
+		providerConfigCredentialsSecretRefIndexer,
+	); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&obsv1alpha1.ProviderConfig{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.providerConfigsForSecret),
+		).
 		Named("providerconfig").
 		Complete(r)
+}
+
+func providerConfigCredentialsSecretRefIndexer(rawObj client.Object) []string {
+	providerConfig, ok := rawObj.(*obsv1alpha1.ProviderConfig)
+	if !ok || providerConfig.Spec.CredentialsSecretRef.Name == "" {
+		return nil
+	}
+	return []string{providerConfig.Spec.CredentialsSecretRef.Name}
+}
+
+func (r *ProviderConfigReconciler) providerConfigsForSecret(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	providerConfigs := &obsv1alpha1.ProviderConfigList{}
+	if err := r.List(
+		ctx,
+		providerConfigs,
+		client.InNamespace(obj.GetNamespace()),
+		client.MatchingFields{providerConfigCredentialsSecretIndex: obj.GetName()},
+	); err != nil {
+		logf.FromContext(ctx).Error(
+			err,
+			"Failed to list ProviderConfigs for Secret",
+			"name",
+			obj.GetName(),
+			"namespace",
+			obj.GetNamespace(),
+		)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(providerConfigs.Items))
+	for _, providerConfig := range providerConfigs.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKey{
+				Namespace: providerConfig.Namespace,
+				Name:      providerConfig.Name,
+			},
+		})
+	}
+	return requests
 }
 
 func providerConfigReadyCondition(

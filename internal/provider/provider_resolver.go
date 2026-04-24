@@ -64,15 +64,13 @@ type ResolvedClient struct {
 }
 
 type cacheKey struct {
-	ProviderConfig          types.NamespacedName
-	ProviderUID             string
-	ProviderResourceVersion string
-	CredentialsSecret       types.NamespacedName
-	SecretUID               string
-	SecretResourceVersion   string
-	CredentialsHash         string
-	Region                  string
-	Endpoint                string
+	ProviderConfig    types.NamespacedName
+	ProviderUID       string
+	CredentialsSecret types.NamespacedName
+	SecretUID         string
+	CredentialsHash   string
+	Region            string
+	Endpoint          string
 }
 
 // ProviderResolver resolves ProviderConfig resources into OBS clients.
@@ -133,7 +131,8 @@ func (r *ProviderResolver) ResolveProviderConfigObject(
 		return nil, err
 	}
 
-	endpoint, err := ResolveEndpoint(providerConfig.Spec.Region, providerConfig.Spec.Endpoint)
+	region := strings.TrimSpace(providerConfig.Spec.Region)
+	endpoint, err := ResolveEndpoint(region, providerConfig.Spec.Endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -143,14 +142,12 @@ func (r *ProviderResolver) ResolveProviderConfigObject(
 			Namespace: providerConfig.Namespace,
 			Name:      providerConfig.Name,
 		},
-		ProviderUID:             string(providerConfig.UID),
-		ProviderResourceVersion: providerConfig.ResourceVersion,
-		CredentialsSecret:       secretKey,
-		SecretUID:               string(secret.UID),
-		SecretResourceVersion:   secret.ResourceVersion,
-		CredentialsHash:         credentials.Hash(),
-		Region:                  providerConfig.Spec.Region,
-		Endpoint:                endpoint,
+		ProviderUID:       string(providerConfig.UID),
+		CredentialsSecret: secretKey,
+		SecretUID:         string(secret.UID),
+		CredentialsHash:   credentials.Hash(),
+		Region:            region,
+		Endpoint:          endpoint,
 	}
 
 	if resolved, ok := r.cache.get(key); ok {
@@ -159,7 +156,7 @@ func (r *ProviderResolver) ResolveProviderConfigObject(
 		return &cached, nil
 	}
 
-	obsClient, err := r.newOBSClient(credentials, endpoint, providerConfig.Spec.Region)
+	obsClient, err := r.newOBSClient(credentials, endpoint, region)
 	if err != nil {
 		return nil, fmt.Errorf("build OBS client: %w", err)
 	}

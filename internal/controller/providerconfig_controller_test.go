@@ -25,7 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	obsv1alpha1 "go.wilaris.de/obs-operator/api/v1alpha1"
@@ -40,7 +42,7 @@ var _ = Describe("ProviderConfig Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default",
+			Namespace: "default", // TODO(user):Modify as needed
 		}
 		providerconfig := &obsv1alpha1.ProviderConfig{}
 
@@ -86,6 +88,7 @@ var _ = Describe("ProviderConfig Controller", func() {
 		})
 
 		AfterEach(func() {
+			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &obsv1alpha1.ProviderConfig{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
@@ -131,6 +134,21 @@ var _ = Describe("ProviderConfig Controller", func() {
 		})
 
 		It("should set Ready false when the credentials Secret is missing", func() {
+			cache := provider.NewCache()
+
+			By("Reconciling the ProviderConfig to warm the cache")
+			controllerReconciler := &ProviderConfigReconciler{
+				Client:           k8sClient,
+				Scheme:           k8sClient.Scheme(),
+				ProviderResolver: provider.NewProviderResolver(k8sClient, cache),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cache.Len()).To(Equal(1))
+
 			By("Deleting the credentials Secret")
 			secret := &corev1.Secret{}
 			Expect(
@@ -143,16 +161,11 @@ var _ = Describe("ProviderConfig Controller", func() {
 			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
 
 			By("Reconciling the ProviderConfig")
-			controllerReconciler := &ProviderConfigReconciler{
-				Client:           k8sClient,
-				Scheme:           k8sClient.Scheme(),
-				ProviderResolver: provider.NewProviderResolver(k8sClient, provider.NewCache()),
-			}
-
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
+			Expect(cache.Len()).To(Equal(0))
 
 			By("Verifying the ProviderConfig Ready condition")
 			Eventually(func(g Gomega) {
@@ -165,6 +178,94 @@ var _ = Describe("ProviderConfig Controller", func() {
 				g.Expect(resource.Status.ObservedGeneration).To(Equal(resource.Generation))
 				g.Expect(resource.Status.LastValidationTime).NotTo(BeNil())
 			}).Should(Succeed())
+		})
+	})
+
+	Context("When mapping credentials Secret events", func() {
+		It("should enqueue same-namespace ProviderConfigs that reference the Secret", func() {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(obsv1alpha1.AddToScheme(scheme)).To(Succeed())
+
+			matchingProviderConfig := &obsv1alpha1.ProviderConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "matching",
+					Namespace: "default",
+				},
+				Spec: obsv1alpha1.ProviderConfigSpec{
+					Region: "eu-de",
+					CredentialsSecretRef: corev1.LocalObjectReference{
+						Name: "otc-credentials",
+					},
+				},
+			}
+			otherSecretProviderConfig := &obsv1alpha1.ProviderConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "other-secret",
+					Namespace: "default",
+				},
+				Spec: obsv1alpha1.ProviderConfigSpec{
+					Region: "eu-de",
+					CredentialsSecretRef: corev1.LocalObjectReference{
+						Name: "other-credentials",
+					},
+				},
+			}
+			otherNamespaceProviderConfig := &obsv1alpha1.ProviderConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "other-namespace",
+					Namespace: "other",
+				},
+				Spec: obsv1alpha1.ProviderConfigSpec{
+					Region: "eu-de",
+					CredentialsSecretRef: corev1.LocalObjectReference{
+						Name: "otc-credentials",
+					},
+				},
+			}
+
+			k8sClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithIndex(
+					&obsv1alpha1.ProviderConfig{},
+					providerConfigCredentialsSecretIndex,
+					providerConfigCredentialsSecretRefIndexer,
+				).
+				WithObjects(
+					matchingProviderConfig,
+					otherSecretProviderConfig,
+					otherNamespaceProviderConfig,
+				).
+				Build()
+			controllerReconciler := &ProviderConfigReconciler{Client: k8sClient}
+
+			requests := controllerReconciler.providerConfigsForSecret(
+				ctx,
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "otc-credentials",
+						Namespace: "default",
+					},
+				},
+			)
+			Expect(requests).To(ConsistOf(reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      "matching",
+					Namespace: "default",
+				},
+			}))
+
+			requests = controllerReconciler.providerConfigsForSecret(
+				ctx,
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "unknown",
+						Namespace: "default",
+					},
+				},
+			)
+			Expect(requests).To(BeEmpty())
 		})
 	})
 })

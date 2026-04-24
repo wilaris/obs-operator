@@ -135,7 +135,11 @@ func TestProviderResolverCachesUntilInputsChange(t *testing.T) {
 		Build()
 
 	builds := 0
+	closes := 0
 	cache := NewCache()
+	cache.closeClient = func(*obs.ObsClient) {
+		closes++
+	}
 	resolver := NewProviderResolver(
 		k8sClient,
 		cache,
@@ -172,6 +176,47 @@ func TestProviderResolverCachesUntilInputsChange(t *testing.T) {
 	if builds != 1 {
 		t.Fatalf("expected cached client to avoid rebuild, got %d builds", builds)
 	}
+	if cache.Len() != 1 {
+		t.Fatalf("expected one cached client, got %d entries", cache.Len())
+	}
+
+	providerConfig.Labels = map[string]string{"metadata-only": "true"}
+	if err := k8sClient.Update(ctx, providerConfig); err != nil {
+		t.Fatalf("update provider metadata: %v", err)
+	}
+
+	afterProviderMetadata, err := resolver.ResolveProviderConfig(
+		ctx,
+		types.NamespacedName{Namespace: "default", Name: "provider"},
+	)
+	if err != nil {
+		t.Fatalf("resolve provider after metadata change: %v", err)
+	}
+	if !afterProviderMetadata.FromCache {
+		t.Fatal("metadata-only ProviderConfig change should use cached client")
+	}
+	if builds != 1 {
+		t.Fatalf("expected metadata-only ProviderConfig change to avoid rebuild, got %d builds", builds)
+	}
+
+	secret.Labels = map[string]string{"metadata-only": "true"}
+	if err := k8sClient.Update(ctx, secret); err != nil {
+		t.Fatalf("update secret metadata: %v", err)
+	}
+
+	afterSecretMetadata, err := resolver.ResolveProviderConfig(
+		ctx,
+		types.NamespacedName{Namespace: "default", Name: "provider"},
+	)
+	if err != nil {
+		t.Fatalf("resolve provider after secret metadata change: %v", err)
+	}
+	if !afterSecretMetadata.FromCache {
+		t.Fatal("metadata-only Secret change should use cached client")
+	}
+	if builds != 1 {
+		t.Fatalf("expected metadata-only Secret change to avoid rebuild, got %d builds", builds)
+	}
 
 	secret.Data[SecurityTokenSecretKey] = []byte("rotated")
 	if err := k8sClient.Update(ctx, secret); err != nil {
@@ -191,9 +236,18 @@ func TestProviderResolverCachesUntilInputsChange(t *testing.T) {
 	if builds != 2 {
 		t.Fatalf("expected client rebuild after secret change, got %d builds", builds)
 	}
+	if cache.Len() != 1 {
+		t.Fatalf("expected replacement to keep one cached client, got %d entries", cache.Len())
+	}
+	if closes != 1 {
+		t.Fatalf("expected old client to close after replacement, got %d closes", closes)
+	}
 
 	resolver.InvalidateProvider("default", "provider")
 	if cache.Len() != 0 {
 		t.Fatalf("expected cache to be empty after invalidation, got %d entries", cache.Len())
+	}
+	if closes != 2 {
+		t.Fatalf("expected cached client to close after invalidation, got %d closes", closes)
 	}
 }
