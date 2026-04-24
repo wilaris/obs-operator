@@ -167,6 +167,120 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(unexpectedRequests.Load()).To(Equal(int32(0)))
 	})
 
+	It("blocks deletion of non-empty buckets without force destroy", func() {
+		var observeRequests atomic.Int32
+		var bucketDeleteRequests atomic.Int32
+		var versionListRequests atomic.Int32
+		var objectDeleteRequests atomic.Int32
+		var unexpectedRequests atomic.Int32
+		server := httptest.NewServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/non-empty-bucket" {
+					unexpectedRequests.Add(1)
+					w.WriteHeader(http.StatusTeapot)
+					return
+				}
+
+				switch {
+				case r.Method == http.MethodHead && r.URL.RawQuery == "":
+					observeRequests.Add(1)
+					w.WriteHeader(http.StatusOK)
+				case r.Method == http.MethodDelete && r.URL.RawQuery == "":
+					bucketDeleteRequests.Add(1)
+					w.Header().Set("Content-Type", "application/xml")
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(
+						`<?xml version="1.0" encoding="UTF-8"?><Error><Code>BucketNotEmpty</Code><Message>The bucket you tried to delete is not empty</Message></Error>`,
+					))
+				case r.Method == http.MethodGet && r.URL.Query().Has("versions"):
+					versionListRequests.Add(1)
+					w.WriteHeader(http.StatusTeapot)
+				case r.Method == http.MethodPost && r.URL.Query().Has("delete"):
+					objectDeleteRequests.Add(1)
+					w.WriteHeader(http.StatusTeapot)
+				default:
+					unexpectedRequests.Add(1)
+					w.WriteHeader(http.StatusTeapot)
+				}
+			}),
+		)
+		DeferCleanup(server.Close)
+
+		providerConfig := &obsv1alpha1.ProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "provider",
+				Namespace: namespace,
+			},
+			Spec: obsv1alpha1.ProviderConfigSpec{
+				Region:   "eu-de",
+				Endpoint: "https://obs.test",
+				CredentialsSecretRef: corev1.LocalObjectReference{
+					Name: "obs-credentials",
+				},
+			},
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "obs-credentials",
+				Namespace: namespace,
+			},
+			Data: map[string][]byte{
+				provider.AccessKeyIDSecretKey:     []byte("access-key"),
+				provider.SecretAccessKeySecretKey: []byte("secret-key"),
+			},
+		}
+		bucket := testBucket("non-empty-bucket", obsv1alpha1.BucketSpec{
+			ProviderConfigRef: corev1.LocalObjectReference{Name: "provider"},
+		})
+		now := metav1.Now()
+		bucket.DeletionTimestamp = &now
+		bucket.Finalizers = []string{bucketFinalizer}
+
+		k8sClient := testClient(scheme, providerConfig, secret, bucket)
+		resolver := provider.NewProviderResolver(
+			k8sClient,
+			provider.NewCache(),
+			provider.WithOBSClientFactory(func(
+				credentials provider.Credentials,
+				_ string,
+				region string,
+			) (*obs.ObsClient, error) {
+				return obs.New(
+					credentials.AccessKeyID,
+					credentials.SecretAccessKey,
+					server.URL,
+					obs.WithPathStyle(true),
+					obs.WithRegion(region),
+					obs.WithMaxRetryCount(0),
+				)
+			}),
+		)
+		reconciler := &BucketReconciler{Client: k8sClient, ProviderResolver: resolver}
+
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      bucket.Name,
+				Namespace: bucket.Namespace,
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(reconcile.Result{}))
+
+		current := &obsv1alpha1.Bucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bucket), current)).To(Succeed())
+		Expect(current.Finalizers).To(ContainElement(bucketFinalizer))
+		condition := meta.FindStatusCondition(current.Status.Conditions, bucketReadyCondition)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+		Expect(condition.Reason).To(Equal("BucketNotEmpty"))
+		Expect(condition.Message).To(ContainSubstring("BucketNotEmpty"))
+		Expect(observeRequests.Load()).To(Equal(int32(1)))
+		Expect(bucketDeleteRequests.Load()).To(Equal(int32(1)))
+		Expect(versionListRequests.Load()).To(Equal(int32(0)))
+		Expect(objectDeleteRequests.Load()).To(Equal(int32(0)))
+		Expect(unexpectedRequests.Load()).To(Equal(int32(0)))
+	})
+
 	It("maps ProviderConfig events to same-namespace Buckets", func() {
 		matching := testBucket("matching", obsv1alpha1.BucketSpec{
 			ProviderConfigRef: corev1.LocalObjectReference{Name: "provider"},

@@ -113,6 +113,10 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if observation.exists {
 			// Only delete the remote bucket after observing that it still exists.
 			if err := r.delete(ctx, obsClient, bucket); err != nil {
+				if isBucketNotEmpty(err) && !bucket.Spec.ForceDestroy {
+					condition := bucketReadyStatusCondition(bucket, err)
+					return ctrl.Result{}, r.updateBucketStatus(ctx, bucket, resolved, condition)
+				}
 				return r.patchStatus(ctx, bucket, resolved, err)
 			}
 		}
