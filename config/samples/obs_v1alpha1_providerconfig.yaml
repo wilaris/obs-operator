@@ -1,0 +1,9 @@
+apiVersion: obs.wilaris.de/v1alpha1
+kind: ProviderConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: obs-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: providerconfig-sample
+spec:
+  # TODO(user): Add fields here
