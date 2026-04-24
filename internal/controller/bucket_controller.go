@@ -92,12 +92,11 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	resolved, obsClient, err := r.resolveBucketClient(ctx, bucket)
 	if err != nil {
+		condition := bucketReadyStatusCondition(bucket, err)
 		log.Info(
-			"Bucket provider could not be resolved",
-			"name",
-			bucket.Name,
-			"namespace",
-			bucket.Namespace,
+			"Bucket provider not ready",
+			"reason",
+			condition.Reason,
 			"error",
 			err.Error(),
 		)
@@ -115,15 +114,28 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			if err := r.delete(ctx, obsClient, bucket); err != nil {
 				if isBucketNotEmpty(err) && !bucket.Spec.ForceDestroy {
 					condition := bucketReadyStatusCondition(bucket, err)
+					log.Info(
+						"OBS bucket is not empty",
+						"reason",
+						condition.Reason,
+						"forceDestroy",
+						bucket.Spec.ForceDestroy,
+						"error",
+						err.Error(),
+					)
 					return ctrl.Result{}, r.updateBucketStatus(ctx, bucket, resolved, condition)
 				}
 				return r.patchStatus(ctx, bucket, resolved, err)
 			}
 		}
 
-		return ctrl.Result{}, r.patchFinalizer(ctx, bucket, func() {
+		if err := r.patchFinalizer(ctx, bucket, func() {
 			controllerutil.RemoveFinalizer(bucket, bucketFinalizer)
-		})
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("Removed bucket finalizer")
+		return ctrl.Result{}, nil
 	}
 
 	if !hasFinalizer {
@@ -133,6 +145,14 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 				"%w: bucket %s already exists and is not managed by this Bucket",
 				errBucketAlreadyExists,
 				bucket.Name,
+			)
+			condition := bucketReadyStatusCondition(bucket, err)
+			log.Info(
+				"OBS bucket already exists and is unmanaged",
+				"reason",
+				condition.Reason,
+				"error",
+				err.Error(),
 			)
 			return r.patchStatus(ctx, bucket, resolved, err)
 		}
@@ -146,12 +166,16 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		log.Info("Added bucket finalizer")
 
 		if err := r.create(ctx, obsClient, bucket, resolved.Region); err != nil {
 			if errors.Is(err, errBucketAlreadyExists) {
 				removeErr := r.patchFinalizer(ctx, bucket, func() {
 					controllerutil.RemoveFinalizer(bucket, bucketFinalizer)
 				})
+				if removeErr == nil {
+					log.Info("Removed bucket finalizer after create conflict")
+				}
 				if removeErr != nil {
 					err = errors.Join(
 						err,
@@ -176,18 +200,6 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err != nil {
 		return r.patchStatus(ctx, bucket, resolved, err)
 	}
-
-	log.Info(
-		"Reconciled Bucket",
-		"name",
-		bucket.Name,
-		"namespace",
-		bucket.Namespace,
-		"region",
-		resolved.Region,
-		"fromCache",
-		resolved.FromCache,
-	)
 
 	return r.patchStatus(ctx, bucket, resolved, nil, observation.metadata)
 }
@@ -231,7 +243,7 @@ func (r *BucketReconciler) observe(
 }
 
 func (r *BucketReconciler) create(
-	_ context.Context,
+	ctx context.Context,
 	obsClient *obs.ObsClient,
 	bucket *obsv1alpha1.Bucket,
 	region string,
@@ -250,6 +262,17 @@ func (r *BucketReconciler) create(
 		}
 		return fmt.Errorf("create bucket %s: %w", bucket.Name, err)
 	}
+	logf.FromContext(ctx).Info(
+		"Created OBS bucket",
+		"region",
+		region,
+		"storageClass",
+		input.StorageClass,
+		"acl",
+		input.ACL,
+		"parallelFS",
+		input.IsFSFileInterface,
+	)
 	return nil
 }
 
@@ -298,11 +321,16 @@ func (r *BucketReconciler) delete(
 	if err != nil {
 		return fmt.Errorf("delete bucket %s: %w", bucket.Name, err)
 	}
+	logf.FromContext(ctx).Info(
+		"Deleted OBS bucket",
+		"forceDestroy",
+		bucket.Spec.ForceDestroy,
+	)
 	return nil
 }
 
 func reconcileBucketStorageClass(
-	_ context.Context,
+	ctx context.Context,
 	obsClient *obs.ObsClient,
 	bucket *obsv1alpha1.Bucket,
 ) error {
@@ -327,11 +355,18 @@ func reconcileBucketStorageClass(
 	if err != nil {
 		return fmt.Errorf("set bucket storage class: %w", err)
 	}
+	logf.FromContext(ctx).Info(
+		"Updated bucket storage class",
+		"from",
+		current.StorageClass,
+		"to",
+		desired,
+	)
 	return nil
 }
 
 func reconcileBucketACL(
-	_ context.Context,
+	ctx context.Context,
 	obsClient *obs.ObsClient,
 	bucket *obsv1alpha1.Bucket,
 ) error {
@@ -354,11 +389,16 @@ func reconcileBucketACL(
 	if err != nil {
 		return fmt.Errorf("set bucket acl: %w", err)
 	}
+	keysAndValues := []any{"to", desired}
+	if currentACL, ok := flattenObsBucketCannedACL(current); ok {
+		keysAndValues = append(keysAndValues, "from", currentACL)
+	}
+	logf.FromContext(ctx).Info("Updated bucket ACL", keysAndValues...)
 	return nil
 }
 
 func reconcileBucketVersioning(
-	_ context.Context,
+	ctx context.Context,
 	obsClient *obs.ObsClient,
 	bucket *obsv1alpha1.Bucket,
 ) error {
@@ -386,11 +426,18 @@ func reconcileBucketVersioning(
 	if err != nil {
 		return fmt.Errorf("set bucket versioning: %w", err)
 	}
+	logf.FromContext(ctx).Info(
+		"Updated bucket versioning",
+		"from",
+		current.Status,
+		"to",
+		desired,
+	)
 	return nil
 }
 
 func reconcileBucketTags(
-	_ context.Context,
+	ctx context.Context,
 	obsClient *obs.ObsClient,
 	bucket *obsv1alpha1.Bucket,
 ) error {
@@ -412,6 +459,7 @@ func reconcileBucketTags(
 		if err != nil && !isBucketCode(err, obsNoSuchTagSetCode) && !isBucketNotFound(err) {
 			return fmt.Errorf("delete bucket tags: %w", err)
 		}
+		logf.FromContext(ctx).Info("Cleared bucket tags")
 		return nil
 	}
 
@@ -424,11 +472,16 @@ func reconcileBucketTags(
 	if err != nil {
 		return fmt.Errorf("set bucket tags: %w", err)
 	}
+	logf.FromContext(ctx).Info(
+		"Updated bucket tags",
+		"tagCount",
+		len(desired),
+	)
 	return nil
 }
 
 func reconcileBucketLogging(
-	_ context.Context,
+	ctx context.Context,
 	obsClient *obs.ObsClient,
 	bucket *obsv1alpha1.Bucket,
 ) error {
@@ -446,11 +499,20 @@ func reconcileBucketLogging(
 	if err != nil {
 		return fmt.Errorf("set bucket logging: %w", err)
 	}
+	logf.FromContext(ctx).Info(
+		"Updated bucket logging",
+		"enabled",
+		desired.TargetBucket != "",
+		"targetBucket",
+		desired.TargetBucket,
+		"targetPrefix",
+		desired.TargetPrefix,
+	)
 	return nil
 }
 
 func reconcileBucketEncryption(
-	_ context.Context,
+	ctx context.Context,
 	obsClient *obs.ObsClient,
 	bucket *obsv1alpha1.Bucket,
 ) error {
@@ -473,6 +535,7 @@ func reconcileBucketEncryption(
 			!isBucketNotFound(err) {
 			return fmt.Errorf("delete bucket encryption: %w", err)
 		}
+		logf.FromContext(ctx).Info("Cleared bucket encryption")
 		return nil
 	}
 
@@ -490,6 +553,13 @@ func reconcileBucketEncryption(
 	if err != nil {
 		return fmt.Errorf("set bucket encryption: %w", err)
 	}
+	logf.FromContext(ctx).Info(
+		"Updated bucket encryption",
+		"kmsKeyIDSet",
+		desired.KMSMasterKeyID != "",
+		"kmsProjectIDSet",
+		desired.ProjectID != "",
+	)
 	return nil
 }
 
@@ -627,6 +697,11 @@ func deleteAllBucketObjects(
 				len(deleteOutput.Errors),
 			)
 		}
+		logf.FromContext(ctx).Info(
+			"Deleted OBS object versions",
+			"objectCount",
+			len(objects),
+		)
 
 		if len(objects) < 1000 && !output.IsTruncated {
 			return nil

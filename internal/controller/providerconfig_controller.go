@@ -67,6 +67,7 @@ func (r *ProviderConfigReconciler) Reconcile(
 		if apierrors.IsNotFound(err) {
 			if r.ProviderResolver != nil {
 				r.ProviderResolver.InvalidateProvider(req.Namespace, req.Name)
+				log.Info("ProviderConfig deleted; invalidated provider cache")
 			}
 			return ctrl.Result{}, nil
 		}
@@ -85,29 +86,6 @@ func (r *ProviderConfigReconciler) Reconcile(
 
 	if err != nil {
 		resolver.InvalidateProvider(providerConfig.Namespace, providerConfig.Name)
-		log.Info(
-			"ProviderConfig is not ready",
-			"name",
-			providerConfig.Name,
-			"namespace",
-			providerConfig.Namespace,
-			"error",
-			err.Error(),
-		)
-	} else {
-		log.Info(
-			"Resolved ProviderConfig",
-			"name",
-			providerConfig.Name,
-			"namespace",
-			providerConfig.Namespace,
-			"region",
-			resolved.Region,
-			"endpoint",
-			resolved.Endpoint,
-			"fromCache",
-			resolved.FromCache,
-		)
 	}
 
 	condition := providerConfigReadyCondition(providerConfig, err)
@@ -115,6 +93,29 @@ func (r *ProviderConfigReconciler) Reconcile(
 	if resolved != nil {
 		providerRevision = resolved.ProviderRevision
 	}
+
+	if err != nil {
+		log.Info(
+			"ProviderConfig is not ready",
+			"reason",
+			condition.Reason,
+			"error",
+			err.Error(),
+		)
+	} else {
+		log.Info(
+			"ProviderConfig validated",
+			"region",
+			resolved.Region,
+			"endpoint",
+			resolved.Endpoint,
+			"fromCache",
+			resolved.FromCache,
+			"providerRevision",
+			providerRevision,
+		)
+	}
+
 	if err := r.updateProviderConfigStatus(
 		ctx,
 		providerConfig,
