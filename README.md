@@ -95,6 +95,7 @@ spec:
     name: otc-eu-de
   storageClass: STANDARD
   acl: private
+  enterpriseProjectID: example-enterprise-project-id
   versioning: true
   forceDestroy: false
   tags:
@@ -107,6 +108,7 @@ day-to-day consumption:
 
 - storage class: `STANDARD`, `WARM` or `COLD`
 - canned ACL: `private`, `public-read`, `public-read-write` or `log-delivery-write`
+- optional Enterprise Project assignment with `enterpriseProjectID`
 - versioning
 - bucket tags
 - access logging
@@ -121,7 +123,8 @@ manages buckets that it owns through Kubernetes resources, but it does not try t
 adopt arbitrary existing buckets.
 
 Some fields are fixed after creation because changing them would blur ownership
-or conflict with OBS behavior.
+or conflict with OBS behavior. This includes create-time settings such as
+`parallelFS` and `enterpriseProjectID`.
 
 Deleting a `Bucket` resource deletes the owned OBS bucket as well. Empty buckets
 are removed directly; non-empty buckets require `forceDestroy: true` when the
