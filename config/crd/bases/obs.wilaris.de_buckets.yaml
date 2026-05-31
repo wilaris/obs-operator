@@ -63,6 +63,15 @@ spec:
                 - public-read-write
                 - log-delivery-write
                 type: string
+              enterpriseProjectID:
+                description: |-
+                  EnterpriseProjectID is the OBS Enterprise Project ID used when creating the bucket.
+                  This setting is immutable after bucket creation.
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: enterpriseProjectID is immutable
+                  rule: self == oldSelf
               forceDestroy:
                 default: false
                 description: ForceDestroy deletes all object versions and delete markers

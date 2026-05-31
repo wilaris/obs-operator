@@ -111,6 +111,13 @@ type BucketSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="parallelFS is immutable"
 	ParallelFS bool `json:"parallelFS,omitempty"`
 
+	// EnterpriseProjectID is the Enterprise Project ID used when creating the bucket.
+	// This setting is immutable after bucket creation.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="enterpriseProjectID is immutable"
+	EnterpriseProjectID string `json:"enterpriseProjectID,omitempty"`
+
 	// Tags are OBS bucket tags.
 	// +optional
 	Tags map[string]string `json:"tags,omitempty"`

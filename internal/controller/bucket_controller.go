@@ -255,6 +255,9 @@ func (r *BucketReconciler) create(
 		IsFSFileInterface: bucket.Spec.ParallelFS,
 		StorageClass:      bucketStorageClass(bucket),
 	}
+	if bucket.Spec.EnterpriseProjectID != "" {
+		input.Epid = bucket.Spec.EnterpriseProjectID
+	}
 	input.Location = region
 
 	if _, err := obsClient.CreateBucket(input); err != nil {
@@ -263,8 +266,8 @@ func (r *BucketReconciler) create(
 		}
 		return fmt.Errorf("create bucket %s: %w", bucket.Name, err)
 	}
-	logf.FromContext(ctx).Info(
-		"Created OBS bucket",
+
+	logValues := []any{
 		"region",
 		region,
 		"storageClass",
@@ -273,7 +276,12 @@ func (r *BucketReconciler) create(
 		input.ACL,
 		"parallelFS",
 		input.IsFSFileInterface,
-	)
+	}
+	if input.Epid != "" {
+		logValues = append(logValues, "enterpriseProjectID", input.Epid)
+	}
+
+	logf.FromContext(ctx).Info("Created OBS bucket", logValues...)
 	return nil
 }
 

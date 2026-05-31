@@ -360,6 +360,83 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(condition.Reason).To(Equal("ReconcileFailed"))
 	})
 
+	It("passes enterprise project ID when creating buckets", func() {
+		var createRequests atomic.Int32
+		epidHeaders := make(chan string, 1)
+		server := httptest.NewServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut && r.URL.Path == "/enterprise-bucket" &&
+					r.URL.RawQuery == "" {
+					createRequests.Add(1)
+					epidHeaders <- r.Header.Get("X-Amz-Epid")
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+
+				w.WriteHeader(http.StatusTeapot)
+			}),
+		)
+		DeferCleanup(server.Close)
+
+		obsClient, err := obs.New(
+			"access-key",
+			"secret-key",
+			server.URL,
+			obs.WithPathStyle(true),
+			obs.WithRegion("eu-de"),
+			obs.WithMaxRetryCount(0),
+		)
+		Expect(err).NotTo(HaveOccurred())
+
+		bucket := testBucket("enterprise-bucket", obsv1alpha1.BucketSpec{
+			ProviderConfigRef:   corev1.LocalObjectReference{Name: "provider"},
+			EnterpriseProjectID: "eps-123",
+		})
+
+		reconciler := &BucketReconciler{}
+		Expect(reconciler.create(ctx, obsClient, bucket, "eu-de")).To(Succeed())
+		Expect(createRequests.Load()).To(Equal(int32(1)))
+		Expect(epidHeaders).To(Receive(Equal("eps-123")))
+	})
+
+	It("does not pass enterprise project ID when omitted", func() {
+		var createRequests atomic.Int32
+		epidHeaders := make(chan string, 1)
+		server := httptest.NewServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut && r.URL.Path == "/standard-bucket" &&
+					r.URL.RawQuery == "" {
+					createRequests.Add(1)
+					epidHeaders <- r.Header.Get("X-Amz-Epid")
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+
+				w.WriteHeader(http.StatusTeapot)
+			}),
+		)
+		DeferCleanup(server.Close)
+
+		obsClient, err := obs.New(
+			"access-key",
+			"secret-key",
+			server.URL,
+			obs.WithPathStyle(true),
+			obs.WithRegion("eu-de"),
+			obs.WithMaxRetryCount(0),
+		)
+		Expect(err).NotTo(HaveOccurred())
+
+		bucket := testBucket("standard-bucket", obsv1alpha1.BucketSpec{
+			ProviderConfigRef: corev1.LocalObjectReference{Name: "provider"},
+		})
+
+		reconciler := &BucketReconciler{}
+		Expect(reconciler.create(ctx, obsClient, bucket, "eu-de")).To(Succeed())
+		Expect(createRequests.Load()).To(Equal(int32(1)))
+		Expect(epidHeaders).To(Receive(BeEmpty()))
+	})
+
 	It("blocks deletion of non-empty buckets without force destroy", func() {
 		var observeRequests atomic.Int32
 		var bucketDeleteRequests atomic.Int32
