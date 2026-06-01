@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -170,6 +171,7 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		log.Info("Added bucket finalizer")
 
 		if err := r.create(ctx, obsClient, bucket, resolved.Region); err != nil {
+			logBucketOperationFailure(ctx, bucket, "createBucket", err)
 			if errors.Is(err, errBucketAlreadyExists) {
 				removeErr := r.patchFinalizer(ctx, bucket, func() {
 					controllerutil.RemoveFinalizer(bucket, bucketFinalizer)
@@ -189,11 +191,13 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	} else if !observation.exists {
 		// Finalizer present means we own the bucket, so recreate it if it drifted away.
 		if err := r.create(ctx, obsClient, bucket, resolved.Region); err != nil {
+			logBucketOperationFailure(ctx, bucket, "recreateBucket", err)
 			return r.patchStatus(ctx, bucket, resolved, err)
 		}
 	}
 
 	if err := r.update(ctx, obsClient, bucket); err != nil {
+		logBucketOperationFailure(ctx, bucket, "updateBucket", err)
 		return r.patchStatus(ctx, bucket, resolved, err, observation.metadata)
 	}
 
@@ -742,6 +746,26 @@ func (r *BucketReconciler) patchStatus(
 	return ctrl.Result{}, reconcileErr
 }
 
+func logBucketOperationFailure(
+	ctx context.Context,
+	bucket *obsv1alpha1.Bucket,
+	operation string,
+	err error,
+) {
+	condition := bucketReadyStatusCondition(bucket, err)
+	logf.FromContext(ctx).Info(
+		"OBS bucket operation failed",
+		"operation",
+		operation,
+		"reason",
+		condition.Reason,
+		"statusMessage",
+		condition.Message,
+		"error",
+		err.Error(),
+	)
+}
+
 func isUserCorrectableBucketError(err error) bool {
 	if err == nil {
 		return false
@@ -782,7 +806,8 @@ func isUserCorrectableBucketErrorType(err error) bool {
 		errors.Is(err, provider.ErrCredentialsSecretNotFound) ||
 		errors.Is(err, provider.ErrMissingCredentials) ||
 		errors.Is(err, provider.ErrInvalidEndpoint) ||
-		errors.Is(err, errBucketAlreadyExists)
+		errors.Is(err, errBucketAlreadyExists) ||
+		isNonRetryableOBSRequestError(err)
 }
 
 func bucketReadyStatusCondition(
@@ -802,7 +827,7 @@ func bucketReadyStatusCondition(
 	}
 
 	condition.Status = metav1.ConditionFalse
-	condition.Message = err.Error()
+	condition.Message = bucketReadyConditionMessage(err)
 	switch {
 	case errors.Is(err, provider.ErrProviderConfigNotFound):
 		condition.Reason = "ProviderConfigNotFound"
@@ -820,10 +845,20 @@ func bucketReadyStatusCondition(
 		condition.Reason = "BucketNotEmpty"
 	case isBucketNotFound(err):
 		condition.Reason = "BucketNotFound"
+	case isNonRetryableOBSRequestError(err):
+		condition.Reason = "RequestRejected"
 	default:
 		condition.Reason = "ReconcileFailed"
 	}
 	return condition
+}
+
+func bucketReadyConditionMessage(err error) string {
+	var obsErr obs.ObsError
+	if errors.As(err, &obsErr) && obsErr.Message != "" {
+		return obsErr.Message
+	}
+	return err.Error()
 }
 
 func (r *BucketReconciler) updateBucketStatus(
@@ -1057,6 +1092,24 @@ func isCreateBucketConflict(err error) bool {
 	return obsErr.StatusCode == 409 ||
 		obsErr.Code == obsBucketAlreadyExistsCode ||
 		obsErr.Code == obsBucketAlreadyOwnedByYou
+}
+
+func isNonRetryableOBSRequestError(err error) bool {
+	var obsErr obs.ObsError
+	if !errors.As(err, &obsErr) {
+		return false
+	}
+
+	switch obsErr.StatusCode {
+	case http.StatusNotFound,
+		http.StatusRequestTimeout,
+		http.StatusConflict,
+		http.StatusTooManyRequests:
+		return false
+	}
+
+	return obsErr.StatusCode >= http.StatusBadRequest &&
+		obsErr.StatusCode < http.StatusInternalServerError
 }
 
 func isBucketCode(err error, code string) bool {

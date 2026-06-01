@@ -360,6 +360,108 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(condition.Reason).To(Equal("ReconcileFailed"))
 	})
 
+	It("returns nil after status for non-retryable OBS request failures", func() {
+		var observeRequests atomic.Int32
+		var createRequests atomic.Int32
+		server := httptest.NewTLSServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead && r.URL.Path == "/invalid-epid-bucket" &&
+					r.URL.RawQuery == "" {
+					observeRequests.Add(1)
+					w.Header().Set("Content-Type", "application/xml")
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(
+						`<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchBucket</Code><Message>bucket not found</Message></Error>`,
+					))
+					return
+				}
+
+				if r.Method == http.MethodPut && r.URL.Path == "/invalid-epid-bucket" &&
+					r.URL.RawQuery == "" {
+					createRequests.Add(1)
+					w.Header().Set("Content-Type", "application/xml")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(
+						`<?xml version="1.0" encoding="UTF-8"?><Error><Code>InvalidArgument</Code><Message>The enterprise project id is invalid</Message></Error>`,
+					))
+					return
+				}
+
+				w.WriteHeader(http.StatusTeapot)
+			}),
+		)
+		DeferCleanup(server.Close)
+
+		providerConfig := &obsv1alpha1.ProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "provider",
+				Namespace: namespace,
+			},
+			Spec: obsv1alpha1.ProviderConfigSpec{
+				Region:   "eu-de",
+				Endpoint: server.URL,
+				CredentialsSecretRef: corev1.LocalObjectReference{
+					Name: "obs-credentials",
+				},
+			},
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "obs-credentials",
+				Namespace: namespace,
+			},
+			Data: map[string][]byte{
+				provider.AccessKeyIDSecretKey:     []byte("access-key"),
+				provider.SecretAccessKeySecretKey: []byte("secret-key"),
+			},
+		}
+		bucket := testBucket("invalid-epid-bucket", obsv1alpha1.BucketSpec{
+			ProviderConfigRef:   corev1.LocalObjectReference{Name: "provider"},
+			EnterpriseProjectID: "invalid-epid",
+		})
+		k8sClient := testClient(scheme, providerConfig, secret, bucket)
+		resolver := provider.NewProviderResolver(
+			k8sClient,
+			provider.NewCache(),
+			provider.WithOBSClientFactory(func(
+				credentials provider.Credentials,
+				endpoint string,
+				region string,
+			) (*obs.ObsClient, error) {
+				return obs.New(
+					credentials.AccessKeyID,
+					credentials.SecretAccessKey,
+					endpoint,
+					obs.WithPathStyle(true),
+					obs.WithRegion(region),
+					obs.WithMaxRetryCount(0),
+					obs.WithSslVerify(false),
+				)
+			}),
+		)
+		reconciler := &BucketReconciler{Client: k8sClient, ProviderResolver: resolver}
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: bucket.Name, Namespace: bucket.Namespace},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		current := &obsv1alpha1.Bucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bucket), current)).To(Succeed())
+		Expect(current.Finalizers).To(ContainElement(bucketFinalizer))
+		condition := meta.FindStatusCondition(current.Status.Conditions, bucketReadyCondition)
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+		Expect(condition.Reason).To(Equal("RequestRejected"))
+		Expect(condition.Message).To(Equal("The enterprise project id is invalid"))
+		Expect(condition.Message).NotTo(ContainSubstring(bucket.Name))
+		Expect(condition.Message).NotTo(ContainSubstring("Status=400"))
+		Expect(condition.Message).NotTo(ContainSubstring("InvalidArgument"))
+		Expect(condition.Message).NotTo(ContainSubstring("RequestId="))
+		Expect(observeRequests.Load()).To(Equal(int32(1)))
+		Expect(createRequests.Load()).To(Equal(int32(1)))
+	})
+
 	It("passes enterprise project ID when creating buckets", func() {
 		var createRequests atomic.Int32
 		epidHeaders := make(chan string, 1)
@@ -543,7 +645,7 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(condition).NotTo(BeNil())
 		Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 		Expect(condition.Reason).To(Equal("BucketNotEmpty"))
-		Expect(condition.Message).To(ContainSubstring("BucketNotEmpty"))
+		Expect(condition.Message).To(Equal("The bucket you tried to delete is not empty"))
 		Expect(observeRequests.Load()).To(Equal(int32(1)))
 		Expect(bucketDeleteRequests.Load()).To(Equal(int32(1)))
 		Expect(versionListRequests.Load()).To(Equal(int32(0)))
@@ -629,8 +731,24 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(isBucketNotEmpty(obsError("BucketNotEmpty", 409))).To(BeTrue())
 		Expect(isCreateBucketConflict(obsError(obsBucketAlreadyExistsCode, 409))).To(BeTrue())
 		Expect(isCreateBucketConflict(obsError(obsBucketAlreadyOwnedByYou, 409))).To(BeTrue())
+		Expect(isNonRetryableOBSRequestError(obsError("InvalidArgument", 400))).To(BeTrue())
+		Expect(isNonRetryableOBSRequestError(obsError("AccessDenied", 403))).To(BeTrue())
+		Expect(isNonRetryableOBSRequestError(obsError("NoSuchBucket", 404))).To(BeFalse())
+		Expect(isNonRetryableOBSRequestError(obsError("RequestTimeout", 408))).To(BeFalse())
+		Expect(isNonRetryableOBSRequestError(obsError("Conflict", 409))).To(BeFalse())
+		Expect(isNonRetryableOBSRequestError(obsError("TooManyRequests", 429))).To(BeFalse())
+		Expect(isNonRetryableOBSRequestError(obsError("InternalError", 500))).To(BeFalse())
 		Expect(isBucketCode(obsError(obsNoSuchTagSetCode, 404), obsNoSuchTagSetCode)).To(BeTrue())
 		Expect(isBucketNotFound(obsError("BucketNotEmpty", 409))).To(BeFalse())
+	})
+
+	It("formats bucket condition messages", func() {
+		Expect(bucketReadyConditionMessage(obs.ObsError{
+			BaseModel: obs.BaseModel{StatusCode: http.StatusBadRequest},
+			Code:      "InvalidArgument",
+			Message:   "The enterprise project id is invalid",
+		})).To(Equal("The enterprise project id is invalid"))
+		Expect(bucketReadyConditionMessage(errors.New("plain failure"))).To(Equal("plain failure"))
 	})
 
 	It("classifies user-correctable bucket reconcile errors", func() {
@@ -649,9 +767,13 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(isUserCorrectableBucketError(provider.ErrMissingCredentials)).To(BeTrue())
 		Expect(isUserCorrectableBucketError(provider.ErrInvalidEndpoint)).To(BeTrue())
 		Expect(isUserCorrectableBucketError(errBucketAlreadyExists)).To(BeTrue())
+		Expect(isUserCorrectableBucketError(obsError("InvalidArgument", 400))).To(BeTrue())
+		Expect(isUserCorrectableBucketError(obsError("AccessDenied", 403))).To(BeTrue())
 		Expect(isUserCorrectableBucketError(fmt.Errorf("wrapped: %w", errBucketAlreadyExists))).
 			To(BeTrue())
 		Expect(isUserCorrectableBucketError(notFoundErr)).To(BeFalse())
+		Expect(isUserCorrectableBucketError(obsError("InternalError", 500))).To(BeFalse())
+		Expect(isUserCorrectableBucketError(obsError("TooManyRequests", 429))).To(BeFalse())
 		Expect(isUserCorrectableBucketError(transientErr)).To(BeFalse())
 		Expect(isUserCorrectableBucketError(errors.Join(errBucketAlreadyExists, transientErr))).
 			To(BeFalse())
