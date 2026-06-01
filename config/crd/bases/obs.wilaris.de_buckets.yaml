@@ -65,7 +65,7 @@ spec:
                 type: string
               enterpriseProjectID:
                 description: |-
-                  EnterpriseProjectID is the OBS Enterprise Project ID used when creating the bucket.
+                  EnterpriseProjectID is the Enterprise Project ID used when creating the bucket.
                   This setting is immutable after bucket creation.
                 minLength: 1
                 type: string
