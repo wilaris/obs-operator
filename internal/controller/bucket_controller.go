@@ -32,10 +32,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	obsv1alpha1 "go.wilaris.de/obs-operator/api/v1alpha1"
@@ -169,9 +172,15 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			return ctrl.Result{}, err
 		}
 		log.Info("Added bucket finalizer")
-
+		return ctrl.Result{}, nil
+	} else if !observation.exists {
+		// Finalizer present means we own the bucket, so recreate it if it drifted away.
 		if err := r.create(ctx, obsClient, bucket, resolved.Region); err != nil {
-			logBucketOperationFailure(ctx, bucket, "createBucket", err)
+			operation := "createBucket"
+			if bucket.Status.ObservedGeneration > 0 {
+				operation = "recreateBucket"
+			}
+			logBucketOperationFailure(ctx, bucket, operation, err)
 			if errors.Is(err, errBucketAlreadyExists) {
 				removeErr := r.patchFinalizer(ctx, bucket, func() {
 					controllerutil.RemoveFinalizer(bucket, bucketFinalizer)
@@ -186,12 +195,6 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 					)
 				}
 			}
-			return r.patchStatus(ctx, bucket, resolved, err)
-		}
-	} else if !observation.exists {
-		// Finalizer present means we own the bucket, so recreate it if it drifted away.
-		if err := r.create(ctx, obsClient, bucket, resolved.Region); err != nil {
-			logBucketOperationFailure(ctx, bucket, "recreateBucket", err)
 			return r.patchStatus(ctx, bucket, resolved, err)
 		}
 	}
@@ -907,6 +910,22 @@ func (r *BucketReconciler) patchFinalizer(
 	return r.Patch(ctx, bucket, client.MergeFrom(original))
 }
 
+func bucketEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return true
+			}
+			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() ||
+				!reflect.DeepEqual(
+					e.ObjectOld.GetDeletionTimestamp(),
+					e.ObjectNew.GetDeletionTimestamp(),
+				) ||
+				!reflect.DeepEqual(e.ObjectOld.GetFinalizers(), e.ObjectNew.GetFinalizers())
+		},
+	}
+}
+
 func bucketProviderConfigRefIndexer(rawObj client.Object) []string {
 	bucket, ok := rawObj.(*obsv1alpha1.Bucket)
 	if !ok || bucket.Spec.ProviderConfigRef.Name == "" {
@@ -1132,7 +1151,7 @@ func (r *BucketReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&obsv1alpha1.Bucket{}).
+		For(&obsv1alpha1.Bucket{}, builder.WithPredicates(bucketEventPredicate())).
 		Watches(
 			&obsv1alpha1.ProviderConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.bucketsForProviderConfig),

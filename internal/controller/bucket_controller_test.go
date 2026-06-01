@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	obsv1alpha1 "go.wilaris.de/obs-operator/api/v1alpha1"
@@ -445,6 +446,12 @@ var _ = Describe("Bucket Controller", func() {
 			NamespacedName: types.NamespacedName{Name: bucket.Name, Namespace: bucket.Namespace},
 		})
 		Expect(err).NotTo(HaveOccurred())
+		Expect(createRequests.Load()).To(Equal(int32(0)))
+
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: bucket.Name, Namespace: bucket.Namespace},
+		})
+		Expect(err).NotTo(HaveOccurred())
 
 		current := &obsv1alpha1.Bucket{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bucket), current)).To(Succeed())
@@ -458,7 +465,7 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(condition.Message).NotTo(ContainSubstring("Status=400"))
 		Expect(condition.Message).NotTo(ContainSubstring("InvalidArgument"))
 		Expect(condition.Message).NotTo(ContainSubstring("RequestId="))
-		Expect(observeRequests.Load()).To(Equal(int32(1)))
+		Expect(observeRequests.Load()).To(Equal(int32(2)))
 		Expect(createRequests.Load()).To(Equal(int32(1)))
 	})
 
@@ -686,6 +693,45 @@ var _ = Describe("Bucket Controller", func() {
 		Expect(requests).To(ConsistOf(reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: "matching", Namespace: namespace},
 		}))
+	})
+
+	It("filters Bucket status-only update events", func() {
+		predicate := bucketEventPredicate()
+		oldBucket := testBucket("filtered", obsv1alpha1.BucketSpec{
+			ProviderConfigRef: corev1.LocalObjectReference{Name: "provider"},
+		})
+		oldBucket.Generation = 1
+		oldBucket.Finalizers = []string{bucketFinalizer}
+
+		statusOnly := oldBucket.DeepCopy()
+		now := metav1.Now()
+		statusOnly.Status.LastSyncTime = &now
+		Expect(predicate.Update(event.UpdateEvent{
+			ObjectOld: oldBucket,
+			ObjectNew: statusOnly,
+		})).To(BeFalse())
+
+		specChanged := oldBucket.DeepCopy()
+		specChanged.Generation = 2
+		Expect(predicate.Update(event.UpdateEvent{
+			ObjectOld: oldBucket,
+			ObjectNew: specChanged,
+		})).To(BeTrue())
+
+		finalizerChanged := oldBucket.DeepCopy()
+		finalizerChanged.Finalizers = nil
+		Expect(predicate.Update(event.UpdateEvent{
+			ObjectOld: oldBucket,
+			ObjectNew: finalizerChanged,
+		})).To(BeTrue())
+
+		deleting := oldBucket.DeepCopy()
+		deletionTimestamp := metav1.Now()
+		deleting.DeletionTimestamp = &deletionTimestamp
+		Expect(predicate.Update(event.UpdateEvent{
+			ObjectOld: oldBucket,
+			ObjectNew: deleting,
+		})).To(BeTrue())
 	})
 
 	It("builds bucket OBS helper values", func() {
