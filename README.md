@@ -11,6 +11,31 @@ Kubernetes status conditions.
 The project intentionally keeps the model small: one resource describes how to
 connect to OBS and one resource describes a bucket.
 
+
+## Install
+
+Apply the latest stable release manifest:
+
+```sh
+kubectl apply -f https://github.com/wilaris/obs-operator/releases/latest/download/install.yaml
+```
+
+This installs `obs-operator` into your current Kubernetes cluster. The manifest
+creates the `ProviderConfig` and `Bucket` CRDs, the `obs-operator-system`
+namespace, the controller RBAC, the controller manager deployment and the
+metrics service.
+
+The installed controller image is pinned to the matching GHCR package tag. For a
+specific version, apply the manifest from that release:
+
+```sh
+kubectl apply -f https://github.com/wilaris/obs-operator/releases/download/vX.Y.Z/install.yaml
+```
+
+After installation, create a `ProviderConfig` with your OBS credentials and then
+create `Bucket` resources in the namespaces where buckets should be managed.
+
+
 ## Why this exists
 
 We needed a practical way to provide customers with self-service resources such
